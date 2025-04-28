@@ -49,6 +49,12 @@ static bool mouse_button[3] = {false, false, false};			// Mouse button states
 static bool old_mouse_button[3] = {false, false, false};
 static bool relative_mouse = false;
 
+static int joystick_x = 0, joystick_y = 0;							// Joystick position
+static int old_joystick_x = 0, old_joystick_y = 0;
+static bool joystick_button[5] = {false, false, false, false, false};			// Joystick button states 5 buttons is for MouseStick II Compatibility
+static bool old_joystick_button[5] = {false, false, false, false, false};
+static bool relative_joystick = false;
+
 static uint8 key_states[16];				// Key states (Mac keycodes)
 #define MATRIX(code) (key_states[code >> 3] & (1 << (~code & 7)))
 
@@ -63,6 +69,7 @@ static uint8 button_buffer[BUTTON_BUFFER_SIZE];
 static unsigned int button_read_ptr = 0, button_write_ptr = 0;
 
 static uint8 mouse_reg_3[2] = {0x63, 0x01};	// Mouse ADB register 3
+static uint8 joystick_reg_3[2] = {0x64, 0x4e};	// Joystick ADB register 3
 
 static uint8 key_reg_2[2] = {0xff, 0xff};	// Keyboard ADB register 2
 static uint8 key_reg_3[2] = {0x62, 0x05};	// Keyboard ADB register 3
@@ -114,6 +121,8 @@ void ADBOp(uint8 op, uint8 *data)
 		key_reg_2[1] = 0xff;
 		key_reg_3[0] = 0x62;
 		key_reg_3[1] = m_keyboard_type;
+		joystick_reg_3[0] = 0x64;
+		joystick_reg_3[0] = 0x4e;
 		return;
 	}
 
@@ -296,6 +305,60 @@ void ADBSetRelMouseMode(bool relative)
 
 
 /*
+ *  Joystick was moved (x/y are absolute or relative, depending on ADBSetRelJoystickMode())
+ */
+
+void ADBJoystickMoved(int x, int y)
+{
+/*	if (relative_joystick) {
+		joystick_x += x; joystick_y += y;
+	} else {
+		joystick_x = x; joystick_y = y;
+	}
+	SetInterruptFlag(INTFLAG_ADB);
+	TriggerInterrupt();*/
+}
+
+
+/* 
+ *  Joystick button pressed
+ */
+
+void ADBJoystickDown(int button)
+{
+/*	joystick_button[button] = true;
+	SetInterruptFlag(INTFLAG_ADB);
+	TriggerInterrupt();*/
+}
+
+
+/*
+ *  Joystick button released
+ */
+
+void ADBJoystickUp(int button)
+{
+/*	joystick_button[button] = false;
+	SetInterruptFlag(INTFLAG_ADB);
+	TriggerInterrupt();*/
+}
+
+
+/*
+ *  Set joystick mode (absolute or relative)
+ */
+
+void ADBSetRelJoystickMode(bool relative)
+{
+/*	if (relative_joystick != relative) {
+		relative_joystick = relative;
+		joystick_x = joystick_y = 0;
+	}*/
+}
+
+
+
+/*
  *  Key pressed ("code" is the Mac key code)
  */
 
@@ -428,7 +491,7 @@ void ADBInterrupt(void)
             uint8 button = button_buffer[button_read_ptr];
             button_read_ptr = (button_read_ptr + 1) % BUTTON_BUFFER_SIZE;
             mouse_button[button & 0x3] = (button & 0x80) ? false : true;
-
+		// Send mouse button events
             if (mouse_button[0] != old_mouse_button[0] || mouse_button[1] != old_mouse_button[1] || mouse_button[2] != old_mouse_button[2]) {
                 uint32 mouse_base = adb_base + 16;
 
@@ -457,7 +520,111 @@ void ADBInterrupt(void)
                 old_mouse_button[2] = mouse_button[2];
             }
         }
+/*
+	// Get joystick state
+	int jx = joystick_x;
+	int jy = joystick_y;
+	if (relative_joystick)
+		joystick_x = joystick_y = 0;
+	bool jb[5] = {joystick_button[0], joystick_button[1], joystick_button[2], joystick_button[3], joystick_button[4]};
 
+	uint32 joystick_base = adb_base + 16;
+
+	if (relative_joystick) {
+
+		// joystick movement (relative) and buttons
+		if (jx != 0 || jy != 0 || jb[0] != old_joystick_button[0] || jb[1] != old_joystick_button[1] || jb[2] != old_joystick_button[2] || jb[3] != old_joystick_button[3] || jb[4] != old_joystick_button[4]) {
+
+			// Call joystick ADB handler
+			if (joystick_reg_3[1] == 4) {
+				// Extended joystick protocol
+				WriteMacInt8(tmp_data, 3);
+				WriteMacInt8(tmp_data + 1, (jy & 0x7f) | (jb[0] ? 0 : 0x80));
+				WriteMacInt8(tmp_data + 2, (jx & 0x7f) | (jb[1] ? 0 : 0x80));
+				WriteMacInt8(tmp_data + 3, ((jy >> 3) & 0x70) | ((jx >> 7) & 0x07) | (jb[2] ? 0x08 : 0x88));
+				//HELP, NO IDEA HERE
+			} else {
+				// 100/200 dpi mode
+				WriteMacInt8(tmp_data, 2);
+				WriteMacInt8(tmp_data + 1, (jy & 0x7f) | (jb[0] ? 0 : 0x80));
+				WriteMacInt8(tmp_data + 2, (jx & 0x7f) | (jb[1] ? 0 : 0x80));
+			}
+			r.a[0] = tmp_data;
+			r.a[1] = ReadMacInt32(joystick_base);
+			r.a[2] = ReadMacInt32(joystick_base + 4);
+			r.a[3] = adb_base;
+			r.d[0] = (joystick_reg_3[0] << 4) | 0x0c;	// Talk 0
+			Execute68k(r.a[1], &r);
+
+			old_joystick_button[0] = jb[0];
+			old_joystick_button[1] = jb[1];
+			old_joystick_button[2] = jb[2];
+			old_joystick_button[3] = jb[3];
+			old_joystick_button[4] = jb[4];
+		}
+
+	} else {
+
+		// Update joystick position (absolute)
+		if (jx != old_joystick_x || jy != old_joystick_y) {
+#ifdef POWERPC_ROM
+			static const uint8 proc_template[] = {
+				0x2f, 0x08,		// move.l a0,-(sp)
+				0x2f, 0x00,		// move.l d0,-(sp)
+				0x2f, 0x01,		// move.l d1,-(sp)
+				0x70, 0x01,		// moveq #1,d0 (MoveTo)
+				0xaa, 0xdb,		// CursorDeviceDispatch
+				M68K_RTS >> 8, M68K_RTS & 0xff
+			};
+			BUILD_SHEEPSHAVER_PROCEDURE(proc);
+			r.a[0] = ReadMacInt32(joystick_base + 4);
+			r.d[0] = jx;
+			r.d[1] = jy;
+			Execute68k(proc, &r);
+#else
+			WriteMacInt16(0x82a, jx);
+			WriteMacInt16(0x828, jy);
+			WriteMacInt16(0x82e, jx);
+			WriteMacInt16(0x82c, jy);
+			WriteMacInt8(0x8ce, ReadMacInt8(0x8cf));	// CrsrCouple -> CrsrNew
+#endif
+			old_joystick_x = jx;
+			old_joystick_y = jy;
+		}
+
+		// Send joystick button events
+		if (jb[0] != old_joystick_button[0] || jb[1] != old_joystick_button[1] || jb[2] != old_joystick_button[2] || jb[3] != old_joystick_button[3] || jb[4] != old_joystick_button[4]) {
+			uint32 joystick_base = adb_base + 16;
+
+                // Call joystick ADB handler
+                if (joystick_reg_3[1] == 4) {
+                    // Extended joystick protocol
+                    WriteMacInt8(tmp_data, 3);
+                    WriteMacInt8(tmp_data + 1, jb[0] ? 0 : 0x80);
+                    WriteMacInt8(tmp_data + 2, jb[1] ? 0 : 0x80);
+                    WriteMacInt8(tmp_data + 3, jb[2] ? 0x08 : 0x88);
+//                    WriteMacInt8(tmp_data + 2, jb[3] ? 0 : 0x80); 		//NO IDEA FOR HERE.
+//                    WriteMacInt8(tmp_data + 3, jb[4] ? 0x08 : 0x88);
+                } else {
+                    // 100/200 dpi mode
+                    WriteMacInt8(tmp_data, 2);
+                    WriteMacInt8(tmp_data + 1, jb[0] ? 0 : 0x80);
+                    WriteMacInt8(tmp_data + 2, jb[1] ? 0 : 0x80);
+                }
+                r.a[0] = tmp_data;
+                r.a[1] = ReadMacInt32(joystick_base);
+                r.a[2] = ReadMacInt32(joystick_base + 4);
+                r.a[3] = adb_base;
+                r.d[0] = (joystick_reg_3[0] << 4) | 0x0c;	// Talk 0
+                Execute68k(r.a[1], &r);
+
+                old_joystick_button[0] = jb[0];
+                old_joystick_button[1] = jb[1];
+                old_joystick_button[2] = jb[2];
+                old_joystick_button[3] = jb[3];
+                old_joystick_button[4] = jb[4];
+            }
+        }*/
 	}
 
 	// Process accumulated keyboard events

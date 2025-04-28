@@ -834,7 +834,7 @@
               </packing>
             </child>
             <child>
-              <!-- n-columns=2 n-rows=7 -->
+              <!-- n-columns=2 n-rows=8 -->
               <object class="GtkGrid" id="keyboard-pane">
                 <property name="visible">True</property>
                 <property name="can-focus">False</property>
@@ -1231,6 +1231,24 @@ for most non-Apple keyboards</property>
                     <property name="top-attach">4</property>
                     <property name="width">2</property>
                   </packing>
+                </child>
+                <child>
+                  <object class="GtkLabel">
+                    <property name="visible">True</property>
+                    <property name="can-focus">False</property>
+                    <property name="halign">start</property>
+                    <property name="label" translatable="yes">Joystick</property>
+                    <attributes>
+                      <attribute name="weight" value="bold"/>
+                    </attributes>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">7</property>
+                  </packing>
+                </child>
+                <child>
+                  <placeholder/>
                 </child>
               </object>
               <packing>

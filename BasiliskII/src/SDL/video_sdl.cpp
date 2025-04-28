@@ -95,6 +95,9 @@ const char KEYCODE_FILE_NAME[] = "BasiliskII_keycodes";
 const char KEYCODE_FILE_NAME[] = DATADIR "/keycodes";
 #endif
 
+// Mac Screen Width and Height
+uint32 MacScreenWidth;
+uint32 MacScreenHeight;
 
 // Global variables
 static uint32 frame_skip;							// Prefs items
@@ -674,6 +677,10 @@ void driver_base::set_video_mode(int flags)
 #ifdef ENABLE_VOSF
 	the_host_buffer = (uint8 *)s->pixels;
 #endif
+	// set Mac screen global variabls
+	MacScreenWidth = VIDEO_MODE_X;
+	MacScreenHeight = VIDEO_MODE_Y;
+	D(bug("Set Mac Screen Width: %d, Mac Screen Height: %d\n", MacScreenWidth, MacScreenHeight));
 }
 
 void driver_base::init()
@@ -686,6 +693,10 @@ void driver_base::init()
 	// Allocate memory for frame buffer (SIZE is extended to page-boundary)
 	the_buffer_size = page_extend((aligned_height + 2) * s->pitch);
 	the_buffer = (uint8 *)vm_acquire_framebuffer(the_buffer_size);
+	if (VM_MAP_FAILED == the_buffer) {
+		perror("Failed to allocate frame buffer for guest OS.");
+		abort();
+	}
 	the_buffer_copy = (uint8 *)malloc(the_buffer_size);
 	D(bug("the_buffer = %p, the_buffer_copy = %p, the_host_buffer = %p\n", the_buffer, the_buffer_copy, the_host_buffer));
 
@@ -710,6 +721,10 @@ void driver_base::init()
 		the_buffer_size = (aligned_height + 2) * s->pitch;
 		the_buffer_copy = (uint8 *)calloc(1, the_buffer_size);
 		the_buffer = (uint8 *)vm_acquire_framebuffer(the_buffer_size);
+		if (VM_MAP_FAILED == the_buffer) {
+			perror("Failed to allocate frame buffer for guest OS.");
+			abort();
+		}
 		D(bug("the_buffer = %p, the_buffer_copy = %p\n", the_buffer, the_buffer_copy));
 	}
 
@@ -1863,6 +1878,41 @@ static void handle_events(void)
 				drv->mouse_moved(event.motion.x, event.motion.y);
 				break;
 
+			//Joystick moved
+			case SDL_JOYAXISMOTION:
+				printf("Joystick axis moved\n");
+			break;
+
+			case SDL_JOYBUTTONDOWN:{
+				unsigned int jbutton = event.jbutton.button;
+				printf("Joystick button pressed\n");
+/*				if (jbutton == 0)
+					ADBJoystickDown(0);
+				else if (jbutton == 1)
+					ADBJoystickDown(1);
+				else if (jbutton == 2)
+					ADBJoystickDown(2);
+				else if (jbutton == 3)
+					ADBJoystickDown(3);
+				else if (jbutton == 4)
+					ADBJoystickDown(4);*/
+			break;
+			}
+			case SDL_JOYBUTTONUP:{
+				unsigned int jbutton = event.jbutton.button;
+				printf("Joystick button released\n");
+/*				if (jbutton == 0)
+					ADBJoystickUp(0);
+				else if (jbutton == 1)
+					ADBJoystickUp(1);
+				else if (jbutton == 2)
+					ADBJoystickUp(2);
+				else if (jbutton == 3)
+					ADBJoystickUp(3);
+				else if (jbutton == 4)
+					ADBJoystickUp(4);*/
+			break;
+			}
 			// Keyboard
 			case SDL_KEYDOWN: {
 				int code = -1;

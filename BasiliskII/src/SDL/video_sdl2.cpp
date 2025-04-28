@@ -105,6 +105,9 @@ const char KEYCODE_FILE_NAME[] = DATADIR "/keycodes";
 const char KEYCODE_FILE_NAME2[] = DATADIR "/BasiliskII_keycodes";
 #endif
 
+// Mac Screen Width and Height
+uint32 MacScreenWidth;
+uint32 MacScreenHeight;
 
 // Global variables
 static uint32 frame_skip;							// Prefs items
@@ -638,6 +641,7 @@ public:
 	void resume(void) {}
 	void toggle_mouse_grab(void);
 	void mouse_moved(int x, int y) { ADBMouseMoved(x, y); }
+	void joystick_moved(int x, int y) { ADBJoystickMoved(x, y); }
 
 	void disable_mouse_accel(void);
 	void restore_mouse_accel(void);
@@ -2388,9 +2392,70 @@ static void handle_events(void)
 						ADBKeyUp(key);
 					}
 				}
+				break;
+
+				// Joystick moved
+/*			case SDL_JOYAXISMOTION:
+    		if ( ( event.jaxis.value < -3200 ) || (event.jaxis.value > 3200 ) )
+    		{
+    	    	if( event.jaxis.axis == 0)
+    	    	{
+					//
+					//
+					drv->joystick_moved(event.motion.x);
+					printf("Joystick X moved\n");
+		        }
+
+       			if( event.jaxis.axis == 1)
+       			{
+					//
+					//
+					drv->joystick_moved(event.motion.y);
+					printf("Joystick Y moved\n");
+    	   		}
+    		}
 			break;
 
-			// Keyboard
+			// Joystick button
+			case SDL_JOYBUTTONDOWN: {
+				unsigned int button = event.jbutton.button;
+				if (button == 0){
+					ADBJoystickDown(0);
+					printf("Joy Button 0 pressed\n");
+				}
+				else if (button == 1){
+					ADBJoystickDown(1);
+					printf("Joy Button 1 pressed\n");
+				}
+				else if (button == 2){
+					ADBJoystickDown(2);
+					printf("Joy Button 2 pressed\n");
+				}
+				else if (button == 3){
+					ADBJoystickDown(3);
+					printf("Joy Button 3 pressed\n");
+				}
+				else if (button == 4){
+					ADBJoystickDown(4);
+					printf("Joy Button 4 pressed\n");
+				}
+				break;
+			}
+			case SDL_JOYBUTTONUP: {
+				unsigned int button = event.jbutton.button;
+				if (button == 0)
+					ADBJoystickUp(0);
+				else if (button == 1)
+					ADBJoystickUp(1);
+				else if (button == 2)
+					ADBJoystickUp(2);
+				else if (button == 3)
+					ADBJoystickUp(3);
+				else if (button == 4)
+					ADBJoystickUp(4);
+				break;
+			}*/
+				// Keyboard
 			case SDL_KEYDOWN: {
 				if (event.key.repeat)
 					break;

@@ -1,3 +1,6 @@
+# Joystick Support for BasiliskII and Sheepshaver
+This repository is an attempt at adding SDL Joystick support to Basilisk II and Sheepshaver.
+
 #### BasiliskII
 ```
 macOS     x86_64 JIT / arm64 non-JIT

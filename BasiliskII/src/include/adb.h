@@ -30,11 +30,16 @@ extern void ADBMouseMoved(int x, int y);
 extern void ADBMouseDown(int button);
 extern void ADBMouseUp(int button);
 
+extern void ADBJoystickMoved(int x, int y);
+extern void ADBJoystickDown(int button);
+extern void ADBJoystickUp(int button);
+
 extern void ADBKeyDown(int code);
 extern void ADBKeyUp(int code);
 
 extern void ADBInterrupt(void);
 
 extern void ADBSetRelMouseMode(bool relative);
+extern void ADBSetRelJoystickMode(bool relative);
 
 #endif
