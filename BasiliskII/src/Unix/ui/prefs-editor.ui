@@ -16,6 +16,20 @@
     <property name="step-increment">1</property>
     <property name="page-increment">10</property>
   </object>
+  <object class="GtkAdjustment" id="joystick-index-adj">
+    <property name="lower">0</property>
+    <property name="upper">256</property>
+    <property name="value">0</property>
+    <property name="step-increment">1</property>
+    <property name="page-increment">1</property>
+  </object>
+  <object class="GtkAdjustment" id="joystick-deadzone-adj">
+    <property name="lower">0</property>
+    <property name="upper">32767</property>
+    <property name="value">4096</property>
+    <property name="step-increment">1</property>
+    <property name="page-increment">256</property>
+  </object>
   <object class="GtkApplicationWindow" id="prefs-editor">
     <property name="can-focus">False</property>
     <child>
@@ -834,7 +848,7 @@
               </packing>
             </child>
             <child>
-              <!-- n-columns=2 n-rows=8 -->
+              <!-- n-columns=2 n-rows=12 -->
               <object class="GtkGrid" id="keyboard-pane">
                 <property name="visible">True</property>
                 <property name="can-focus">False</property>
@@ -1248,7 +1262,105 @@ for most non-Apple keyboards</property>
                   </packing>
                 </child>
                 <child>
-                  <placeholder/>
+                  <object class="GtkCheckButton" id="adb_joystick">
+                    <property name="label" translatable="yes">Enable SDL joystick bridge</property>
+                    <property name="name">adb_joystick</property>
+                    <property name="visible">True</property>
+                    <property name="can-focus">True</property>
+                    <property name="receives-default">False</property>
+                    <property name="halign">start</property>
+                    <property name="draw-indicator">True</property>
+                    <signal name="toggled" handler="cb_check_box" swapped="no"/>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">8</property>
+                    <property name="width">2</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkLabel">
+                    <property name="visible">True</property>
+                    <property name="can-focus">False</property>
+                    <property name="label" translatable="yes">Preferred device index:</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">9</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkSpinButton" id="adb_joystick_index">
+                    <property name="name">adb_joystick_index</property>
+                    <property name="visible">True</property>
+                    <property name="can-focus">True</property>
+                    <property name="halign">start</property>
+                    <property name="hexpand">False</property>
+                    <property name="text" translatable="yes">0</property>
+                    <property name="input-purpose">number</property>
+                    <property name="adjustment">joystick-index-adj</property>
+                    <property name="value">0</property>
+                    <signal name="value-changed" handler="cb_spin_button" swapped="no"/>
+                  </object>
+                  <packing>
+                    <property name="left-attach">1</property>
+                    <property name="top-attach">9</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkLabel">
+                    <property name="visible">True</property>
+                    <property name="can-focus">False</property>
+                    <property name="label" translatable="yes">Axis deadzone:</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">10</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkSpinButton" id="adb_joystick_deadzone">
+                    <property name="name">adb_joystick_deadzone</property>
+                    <property name="visible">True</property>
+                    <property name="can-focus">True</property>
+                    <property name="halign">start</property>
+                    <property name="hexpand">False</property>
+                    <property name="tooltip-text" translatable="yes">Clamp small axis movements to ignore controller noise</property>
+                    <property name="text" translatable="yes">4096</property>
+                    <property name="input-purpose">number</property>
+                    <property name="adjustment">joystick-deadzone-adj</property>
+                    <property name="value">4096</property>
+                    <signal name="value-changed" handler="cb_spin_button" swapped="no"/>
+                  </object>
+                  <packing>
+                    <property name="left-attach">1</property>
+                    <property name="top-attach">10</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkLabel">
+                    <property name="visible">True</property>
+                    <property name="can-focus">False</property>
+                    <property name="label" translatable="yes">Mapping overrides:</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">11</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkEntry" id="adb_joystick_map">
+                    <property name="name">adb_joystick_map</property>
+                    <property name="visible">True</property>
+                    <property name="can-focus">True</property>
+                    <property name="hexpand">True</property>
+                    <property name="tooltip-text" translatable="yes">Optional SDL mapping string to remap axes and buttons</property>
+                    <signal name="changed" handler="cb_entry" swapped="no"/>
+                  </object>
+                  <packing>
+                    <property name="left-attach">1</property>
+                    <property name="top-attach">11</property>
+                  </packing>
                 </child>
               </object>
               <packing>

@@ -49,11 +49,12 @@ static bool mouse_button[3] = {false, false, false};			// Mouse button states
 static bool old_mouse_button[3] = {false, false, false};
 static bool relative_mouse = false;
 
-static int joystick_x = 0, joystick_y = 0;							// Joystick position
-static int old_joystick_x = 0, old_joystick_y = 0;
-static bool joystick_button[5] = {false, false, false, false, false};			// Joystick button states 5 buttons is for MouseStick II Compatibility
-static bool old_joystick_button[5] = {false, false, false, false, false};
+static int joystick_axis[ADB_JOYSTICK_AXIS_COUNT] = {0};
+static int old_joystick_axis[ADB_JOYSTICK_AXIS_COUNT] = {0};
+static bool joystick_button[ADB_JOYSTICK_BUTTON_COUNT] = {false, false, false, false, false};		// Joystick button states 5 buttons is for MouseStick II Compatibility
+static bool old_joystick_button[ADB_JOYSTICK_BUTTON_COUNT] = {false, false, false, false, false};
 static bool relative_joystick = false;
+static bool joystick_device_present = false;
 
 static uint8 key_states[16];				// Key states (Mac keycodes)
 #define MATRIX(code) (key_states[code >> 3] & (1 << (~code & 7)))
@@ -78,6 +79,7 @@ static uint8 m_keyboard_type = 0x05;
 
 // ADB mouse motion lock (for platforms that use separate input thread)
 static B2_mutex *mouse_lock;
+static B2_mutex *joystick_lock;
 
 
 /*
@@ -87,8 +89,22 @@ static B2_mutex *mouse_lock;
 void ADBInit(void)
 {
 	mouse_lock = B2_create_mutex();
+	joystick_lock = B2_create_mutex();
+	for (int i = 0; i < ADB_JOYSTICK_AXIS_COUNT; ++i) {
+		joystick_axis[i] = 0x80;
+		old_joystick_axis[i] = -1;
+	}
+	for (int i = 0; i < ADB_JOYSTICK_BUTTON_COUNT; ++i) {
+		joystick_button[i] = false;
+		old_joystick_button[i] = false;
+	}
+	relative_joystick = false;
+	joystick_device_present = false;
 	m_keyboard_type = (uint8)PrefsFindInt32("keyboardtype");
 	key_reg_3[1] = m_keyboard_type;
+	joystick_reg_3[0] = 0x64;
+	joystick_reg_3[1] = 0x4e;
+	joystick_reg_3[0] &= ~0x20;
 }
 
 
@@ -101,6 +117,10 @@ void ADBExit(void)
 	if (mouse_lock) {
 		B2_delete_mutex(mouse_lock);
 		mouse_lock = NULL;
+	}
+	if (joystick_lock) {
+		B2_delete_mutex(joystick_lock);
+		joystick_lock = NULL;
 	}
 }
 
@@ -122,7 +142,9 @@ void ADBOp(uint8 op, uint8 *data)
 		key_reg_3[0] = 0x62;
 		key_reg_3[1] = m_keyboard_type;
 		joystick_reg_3[0] = 0x64;
-		joystick_reg_3[0] = 0x4e;
+		joystick_reg_3[1] = 0x4e;
+		if (!joystick_device_present)
+			joystick_reg_3[0] &= ~0x20;
 		return;
 	}
 
@@ -235,6 +257,54 @@ void ADBOp(uint8 op, uint8 *data)
 		}
 		D(bug(" keyboard reg 3 %02x%02x\n", key_reg_3[0], key_reg_3[1]));
 
+	} else if (adr == (joystick_reg_3[0] & 0x0f)) {
+
+		const bool joystick_enabled = joystick_device_present && (joystick_reg_3[0] & 0x20);
+		if (!joystick_enabled) {
+			if (cmd == 3)
+				data[0] = 0;
+		} else if (cmd == 2) {
+
+			// Listen
+			switch (reg) {
+				case 3:	// Address/HandlerID
+					if (data[2] == 0xfe)		// Change address
+						joystick_reg_3[0] = (joystick_reg_3[0] & 0xf0) | (data[1] & 0x0f);
+					else if (data[2] == 0x00)		// Change address and enable bit
+						joystick_reg_3[0] = (joystick_reg_3[0] & 0xd0) | (data[1] & 0x2f);
+					else					// Change device handler ID
+						joystick_reg_3[1] = data[2];
+					break;
+			}
+
+		} else if (cmd == 3) {
+
+			// Talk
+			switch (reg) {
+				case 1:	// Device info
+					data[0] = 8;
+					data[1] = 'G';
+					data[2] = 'R';
+					data[3] = 'V';
+					data[4] = 'S';
+					data[5] = 0;
+					data[6] = 0;
+					data[7] = 2;				// Class: joystick
+					data[8] = ADB_JOYSTICK_BUTTON_COUNT;
+					break;
+				case 3:	// Address/HandlerID
+					data[0] = 2;
+					data[1] = (joystick_reg_3[0] & 0xf0) | (rand() & 0x0f);
+					data[2] = joystick_reg_3[1];
+					break;
+				default:
+					data[0] = 0;
+					break;
+			}
+
+		}
+
+
 	} else												// Unknown address
 		if (cmd == 3)
 			data[0] = 0;								// Talk: 0 bytes of data
@@ -308,59 +378,121 @@ void ADBSetRelMouseMode(bool relative)
  *  Joystick was moved (x/y are absolute or relative, depending on ADBSetRelJoystickMode())
  */
 
-void ADBJoystickMoved(int x, int y)
+void ADBJoystickSetAxis(int axis, int value)
 {
-/*	if (relative_joystick) {
-		joystick_x += x; joystick_y += y;
-	} else {
-		joystick_x = x; joystick_y = y;
+	if (axis < 0 || axis >= ADB_JOYSTICK_AXIS_COUNT)
+		return;
+	if (value < 0)
+		value = 0;
+	else if (value > 255)
+		value = 255;
+
+	bool changed = false;
+	if (joystick_lock)
+		B2_lock_mutex(joystick_lock);
+	if (joystick_axis[axis] != value) {
+		joystick_axis[axis] = value;
+		changed = true;
 	}
-	SetInterruptFlag(INTFLAG_ADB);
-	TriggerInterrupt();*/
+	if (joystick_lock)
+		B2_unlock_mutex(joystick_lock);
+
+	if (changed) {
+		SetInterruptFlag(INTFLAG_ADB);
+		TriggerInterrupt();
+	}
 }
 
-
-/* 
- *  Joystick button pressed
- */
+void ADBJoystickMoved(int x, int y)
+{
+	ADBJoystickSetAxis(0, x);
+	ADBJoystickSetAxis(1, y);
+}
 
 void ADBJoystickDown(int button)
 {
-/*	joystick_button[button] = true;
-	SetInterruptFlag(INTFLAG_ADB);
-	TriggerInterrupt();*/
+	if (button < 0 || button >= ADB_JOYSTICK_BUTTON_COUNT)
+		return;
+
+	bool changed = false;
+	if (joystick_lock)
+		B2_lock_mutex(joystick_lock);
+	if (!joystick_button[button]) {
+		joystick_button[button] = true;
+		changed = true;
+	}
+	if (joystick_lock)
+		B2_unlock_mutex(joystick_lock);
+
+	if (changed) {
+		SetInterruptFlag(INTFLAG_ADB);
+		TriggerInterrupt();
+	}
 }
-
-
-/*
- *  Joystick button released
- */
 
 void ADBJoystickUp(int button)
 {
-/*	joystick_button[button] = false;
-	SetInterruptFlag(INTFLAG_ADB);
-	TriggerInterrupt();*/
+	if (button < 0 || button >= ADB_JOYSTICK_BUTTON_COUNT)
+		return;
+
+	bool changed = false;
+	if (joystick_lock)
+		B2_lock_mutex(joystick_lock);
+	if (joystick_button[button]) {
+		joystick_button[button] = false;
+		changed = true;
+	}
+	if (joystick_lock)
+		B2_unlock_mutex(joystick_lock);
+
+	if (changed) {
+		SetInterruptFlag(INTFLAG_ADB);
+		TriggerInterrupt();
+	}
 }
-
-
-/*
- *  Set joystick mode (absolute or relative)
- */
 
 void ADBSetRelJoystickMode(bool relative)
 {
-/*	if (relative_joystick != relative) {
+	if (relative_joystick != relative) {
 		relative_joystick = relative;
-		joystick_x = joystick_y = 0;
-	}*/
+		if (joystick_lock) {
+			B2_lock_mutex(joystick_lock);
+			for (int i = 0; i < ADB_JOYSTICK_AXIS_COUNT; ++i)
+				joystick_axis[i] = 0;
+			B2_unlock_mutex(joystick_lock);
+		}
+	}
+}
+void ADBJoystickSetConnected(bool connected)
+{
+	if (joystick_lock)
+		B2_lock_mutex(joystick_lock);
+
+	joystick_device_present = connected;
+	if (connected) {
+		joystick_reg_3[0] |= 0x20;
+		for (int i = 0; i < ADB_JOYSTICK_AXIS_COUNT; ++i) {
+			if (joystick_axis[i] < 0)
+				joystick_axis[i] = 0;
+			else if (joystick_axis[i] > 255)
+				joystick_axis[i] = 255;
+			old_joystick_axis[i] = -1;
+		}
+	} else {
+		joystick_reg_3[0] &= ~0x20;
+		for (int i = 0; i < ADB_JOYSTICK_BUTTON_COUNT; ++i)
+			joystick_button[i] = false;
+	}
+	for (int i = 0; i < ADB_JOYSTICK_BUTTON_COUNT; ++i)
+		old_joystick_button[i] = !joystick_button[i];
+	if (joystick_lock)
+		B2_unlock_mutex(joystick_lock);
+
+	SetInterruptFlag(INTFLAG_ADB);
+	TriggerInterrupt();
 }
 
 
-
-/*
- *  Key pressed ("code" is the Mac key code)
- */
 
 void ADBKeyDown(int code)
 {
@@ -502,12 +634,14 @@ void ADBInterrupt(void)
                     WriteMacInt8(tmp_data + 1, mouse_button[0] ? 0 : 0x80);
                     WriteMacInt8(tmp_data + 2, mouse_button[1] ? 0 : 0x80);
                     WriteMacInt8(tmp_data + 3, mouse_button[2] ? 0x08 : 0x88);
-                } else {
+		}
+ else {
                     // 100/200 dpi mode
                     WriteMacInt8(tmp_data, 2);
                     WriteMacInt8(tmp_data + 1, mouse_button[0] ? 0 : 0x80);
                     WriteMacInt8(tmp_data + 2, mouse_button[1] ? 0 : 0x80);
-                }
+		}
+
                 r.a[0] = tmp_data;
                 r.a[1] = ReadMacInt32(mouse_base);
                 r.a[2] = ReadMacInt32(mouse_base + 4);
@@ -520,112 +654,66 @@ void ADBInterrupt(void)
                 old_mouse_button[2] = mouse_button[2];
             }
         }
-/*
-	// Get joystick state
-	int jx = joystick_x;
-	int jy = joystick_y;
-	if (relative_joystick)
-		joystick_x = joystick_y = 0;
-	bool jb[5] = {joystick_button[0], joystick_button[1], joystick_button[2], joystick_button[3], joystick_button[4]};
+			// Get joystick state
+		if (joystick_device_present && (joystick_reg_3[0] & 0x20)) {
+			int axes[ADB_JOYSTICK_AXIS_COUNT];
+			bool buttons[ADB_JOYSTICK_BUTTON_COUNT];
 
-	uint32 joystick_base = adb_base + 16;
-
-	if (relative_joystick) {
-
-		// joystick movement (relative) and buttons
-		if (jx != 0 || jy != 0 || jb[0] != old_joystick_button[0] || jb[1] != old_joystick_button[1] || jb[2] != old_joystick_button[2] || jb[3] != old_joystick_button[3] || jb[4] != old_joystick_button[4]) {
-
-			// Call joystick ADB handler
-			if (joystick_reg_3[1] == 4) {
-				// Extended joystick protocol
-				WriteMacInt8(tmp_data, 3);
-				WriteMacInt8(tmp_data + 1, (jy & 0x7f) | (jb[0] ? 0 : 0x80));
-				WriteMacInt8(tmp_data + 2, (jx & 0x7f) | (jb[1] ? 0 : 0x80));
-				WriteMacInt8(tmp_data + 3, ((jy >> 3) & 0x70) | ((jx >> 7) & 0x07) | (jb[2] ? 0x08 : 0x88));
-				//HELP, NO IDEA HERE
-			} else {
-				// 100/200 dpi mode
-				WriteMacInt8(tmp_data, 2);
-				WriteMacInt8(tmp_data + 1, (jy & 0x7f) | (jb[0] ? 0 : 0x80));
-				WriteMacInt8(tmp_data + 2, (jx & 0x7f) | (jb[1] ? 0 : 0x80));
+			if (joystick_lock)
+				B2_lock_mutex(joystick_lock);
+			for (int i = 0; i < ADB_JOYSTICK_AXIS_COUNT; ++i)
+				axes[i] = joystick_axis[i];
+			for (int i = 0; i < ADB_JOYSTICK_BUTTON_COUNT; ++i)
+				buttons[i] = joystick_button[i];
+			if (relative_joystick) {
+				for (int i = 0; i < ADB_JOYSTICK_AXIS_COUNT; ++i)
+					joystick_axis[i] = 0;
 			}
-			r.a[0] = tmp_data;
-			r.a[1] = ReadMacInt32(joystick_base);
-			r.a[2] = ReadMacInt32(joystick_base + 4);
-			r.a[3] = adb_base;
-			r.d[0] = (joystick_reg_3[0] << 4) | 0x0c;	// Talk 0
-			Execute68k(r.a[1], &r);
+			if (joystick_lock)
+				B2_unlock_mutex(joystick_lock);
 
-			old_joystick_button[0] = jb[0];
-			old_joystick_button[1] = jb[1];
-			old_joystick_button[2] = jb[2];
-			old_joystick_button[3] = jb[3];
-			old_joystick_button[4] = jb[4];
+			bool axis_changed = false;
+			for (int i = 0; i < ADB_JOYSTICK_AXIS_COUNT; ++i) {
+				if (axes[i] != old_joystick_axis[i]) {
+					axis_changed = true;
+					break;
+				}
+			}
+			bool button_changed = false;
+			for (int i = 0; i < ADB_JOYSTICK_BUTTON_COUNT; ++i) {
+				if (buttons[i] != old_joystick_button[i]) {
+					button_changed = true;
+					break;
+				}
+			}
+
+			if (axis_changed || button_changed) {
+				uint8 button_mask = 0x1f;
+				for (int i = 0; i < ADB_JOYSTICK_BUTTON_COUNT; ++i) {
+					if (buttons[i])
+						button_mask &= ~(1 << i);
+				}
+
+				uint32 joystick_base = adb_base + 16;
+				WriteMacInt8(tmp_data, 4);
+				WriteMacInt8(tmp_data + 1, axes[0] & 0xff);
+				WriteMacInt8(tmp_data + 2, axes[1] & 0xff);
+				WriteMacInt8(tmp_data + 3, 0);
+				WriteMacInt8(tmp_data + 4, button_mask);
+
+				r.a[0] = tmp_data;
+				r.a[1] = ReadMacInt32(joystick_base);
+				r.a[2] = ReadMacInt32(joystick_base + 4);
+				r.a[3] = adb_base;
+				r.d[0] = (joystick_reg_3[0] << 4) | 0x0c;
+				Execute68k(r.a[1], &r);
+
+				for (int i = 0; i < ADB_JOYSTICK_AXIS_COUNT; ++i)
+					old_joystick_axis[i] = axes[i];
+				for (int i = 0; i < ADB_JOYSTICK_BUTTON_COUNT; ++i)
+					old_joystick_button[i] = buttons[i];
+			}
 		}
-
-	} else {
-
-		// Update joystick position (absolute)
-		if (jx != old_joystick_x || jy != old_joystick_y) {
-#ifdef POWERPC_ROM
-			static const uint8 proc_template[] = {
-				0x2f, 0x08,		// move.l a0,-(sp)
-				0x2f, 0x00,		// move.l d0,-(sp)
-				0x2f, 0x01,		// move.l d1,-(sp)
-				0x70, 0x01,		// moveq #1,d0 (MoveTo)
-				0xaa, 0xdb,		// CursorDeviceDispatch
-				M68K_RTS >> 8, M68K_RTS & 0xff
-			};
-			BUILD_SHEEPSHAVER_PROCEDURE(proc);
-			r.a[0] = ReadMacInt32(joystick_base + 4);
-			r.d[0] = jx;
-			r.d[1] = jy;
-			Execute68k(proc, &r);
-#else
-			WriteMacInt16(0x82a, jx);
-			WriteMacInt16(0x828, jy);
-			WriteMacInt16(0x82e, jx);
-			WriteMacInt16(0x82c, jy);
-			WriteMacInt8(0x8ce, ReadMacInt8(0x8cf));	// CrsrCouple -> CrsrNew
-#endif
-			old_joystick_x = jx;
-			old_joystick_y = jy;
-		}
-
-		// Send joystick button events
-		if (jb[0] != old_joystick_button[0] || jb[1] != old_joystick_button[1] || jb[2] != old_joystick_button[2] || jb[3] != old_joystick_button[3] || jb[4] != old_joystick_button[4]) {
-			uint32 joystick_base = adb_base + 16;
-
-                // Call joystick ADB handler
-                if (joystick_reg_3[1] == 4) {
-                    // Extended joystick protocol
-                    WriteMacInt8(tmp_data, 3);
-                    WriteMacInt8(tmp_data + 1, jb[0] ? 0 : 0x80);
-                    WriteMacInt8(tmp_data + 2, jb[1] ? 0 : 0x80);
-                    WriteMacInt8(tmp_data + 3, jb[2] ? 0x08 : 0x88);
-//                    WriteMacInt8(tmp_data + 2, jb[3] ? 0 : 0x80); 		//NO IDEA FOR HERE.
-//                    WriteMacInt8(tmp_data + 3, jb[4] ? 0x08 : 0x88);
-                } else {
-                    // 100/200 dpi mode
-                    WriteMacInt8(tmp_data, 2);
-                    WriteMacInt8(tmp_data + 1, jb[0] ? 0 : 0x80);
-                    WriteMacInt8(tmp_data + 2, jb[1] ? 0 : 0x80);
-                }
-                r.a[0] = tmp_data;
-                r.a[1] = ReadMacInt32(joystick_base);
-                r.a[2] = ReadMacInt32(joystick_base + 4);
-                r.a[3] = adb_base;
-                r.d[0] = (joystick_reg_3[0] << 4) | 0x0c;	// Talk 0
-                Execute68k(r.a[1], &r);
-
-                old_joystick_button[0] = jb[0];
-                old_joystick_button[1] = jb[1];
-                old_joystick_button[2] = jb[2];
-                old_joystick_button[3] = jb[3];
-                old_joystick_button[4] = jb[4];
-            }
-        }*/
-	}
 
 	// Process accumulated keyboard events
 	while (key_read_ptr != key_write_ptr) {

@@ -30,6 +30,13 @@ extern void ADBMouseMoved(int x, int y);
 extern void ADBMouseDown(int button);
 extern void ADBMouseUp(int button);
 
+enum {
+        ADB_JOYSTICK_AXIS_COUNT = 2,
+        ADB_JOYSTICK_BUTTON_COUNT = 5
+};
+
+extern void ADBJoystickSetConnected(bool connected);
+extern void ADBJoystickSetAxis(int axis, int value);
 extern void ADBJoystickMoved(int x, int y);
 extern void ADBJoystickDown(int button);
 extern void ADBJoystickUp(int button);

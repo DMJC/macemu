@@ -152,13 +152,15 @@ const char *sysinfo = ABOUT_MODE "\nBuilt with " ABOUT_VIDEO " and " ABOUT_AUDIO
 
 // The widgets from prefs-editor.ui that need their values set on launch
 const char *check_boxes[] = {
-	"udptunnel", "keycodes", "ignoresegv", "idlewait", "jit", "jitfpu", "jitinline",
-	"jitlazyflush", "jit68k", "gfxaccel", "swap_opt_cmd", "scale_nearest", "scale_integer", NULL };
+        "udptunnel", "keycodes", "ignoresegv", "idlewait", "jit", "jitfpu", "jitinline",
+        "jitlazyflush", "jit68k", "gfxaccel", "swap_opt_cmd", "scale_nearest", "scale_integer",
+        "adb_joystick", NULL };
 const char *inv_check_boxes[] = { "nocdrom", "nosound", "nogui", NULL };
 const char *entries[] = {
-	"extfs", "dsp", "mixer", "keycodefile", "scsi0", "scsi1", "scsi2", "scsi3", "scsi4",
-	"scsi5", "scsi6", "rom", NULL };
-const char *spin_buttons[] = { "mousewheellines", "udpport", NULL };
+        "extfs", "dsp", "mixer", "keycodefile", "scsi0", "scsi1", "scsi2", "scsi3", "scsi4",
+        "scsi5", "scsi6", "rom", "adb_joystick_map", NULL };
+const char *spin_buttons[] = { "mousewheellines", "udpport", "adb_joystick_index",
+        "adb_joystick_deadzone", NULL };
 const char *id_combos[] = { "bootdriver", "frameskip", "modelid", NULL };
 const char *text_combos[] = { "ramsize", NULL };
 
