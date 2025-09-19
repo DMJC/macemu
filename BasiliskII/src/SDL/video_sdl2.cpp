@@ -49,7 +49,10 @@
 #include <errno.h>
 #include <vector>
 #include <string>
+#include <algorithm>
 #include <math.h>
+#include <ctype.h>
+#include <stdlib.h>
 
 #ifdef __MACOSX__
 #include "utils_macosx.h"
@@ -165,6 +168,31 @@ static bool did_add_event_watch = false;
 
 static bool mouse_grabbed = false;
 
+static bool joystick_pref_enabled = false;
+static SDL_Joystick *active_joystick = NULL;
+static SDL_JoystickID active_joystick_instance = -1;
+static int active_joystick_index = -1;
+static int configured_joystick_index = 0;
+static int joystick_deadzone = 0;
+
+struct JoystickAxisBinding {
+	bool valid;
+	int source;
+	bool invert;
+};
+
+struct JoystickButtonBinding {
+	enum Type { NONE, BUTTON, HAT } type;
+	int index;
+	uint8 hat_mask;
+};
+
+static JoystickAxisBinding joystick_axis_bindings[ADB_JOYSTICK_AXIS_COUNT];
+static JoystickButtonBinding joystick_button_bindings[ADB_JOYSTICK_BUTTON_COUNT];
+static int joystick_axis_values[ADB_JOYSTICK_AXIS_COUNT];
+static bool joystick_button_host_state[ADB_JOYSTICK_BUTTON_COUNT];
+static std::vector<uint8> joystick_hat_states;
+
 // Mutex to protect SDL events
 static SDL_mutex *sdl_events_lock = NULL;
 #define LOCK_EVENTS SDL_LockMutex(sdl_events_lock)
@@ -198,6 +226,360 @@ static void (*video_refresh)(void);
 
 // Prototypes
 static int redraw_func(void *arg);
+static std::string trim(const std::string &s)
+{
+	const size_t first = s.find_first_not_of(" \t\r\n");
+	if (first == std::string::npos)
+		return "";
+	const size_t last = s.find_last_not_of(" \t\r\n");
+	return s.substr(first, last - first + 1);
+}
+
+static std::string to_lower(std::string s)
+{
+	for (size_t i = 0; i < s.size(); ++i)
+		s[i] = tolower(static_cast<unsigned char>(s[i]));
+	return s;
+}
+
+static void joystick_reset_bindings(void)
+{
+	for (int i = 0; i < ADB_JOYSTICK_AXIS_COUNT; ++i) {
+		joystick_axis_bindings[i].valid = true;
+		joystick_axis_bindings[i].source = i;
+		joystick_axis_bindings[i].invert = false;
+		joystick_axis_values[i] = 0x80;
+	}
+	for (int i = 0; i < ADB_JOYSTICK_BUTTON_COUNT; ++i) {
+		joystick_button_bindings[i].type = JoystickButtonBinding::BUTTON;
+		joystick_button_bindings[i].index = i;
+		joystick_button_bindings[i].hat_mask = 0;
+		joystick_button_host_state[i] = false;
+	}
+}
+
+static bool parse_axis_binding(const std::string &value, JoystickAxisBinding &binding)
+{
+	JoystickAxisBinding result;
+	result.valid = false;
+	result.source = 0;
+	result.invert = false;
+
+	std::string token = to_lower(trim(value));
+	if (token.empty() || token == "disabled" || token == "none") {
+		binding = result;
+		return true;
+	}
+	bool invert = false;
+	if (token[0] == '+' || token[0] == '-') {
+		invert = (token[0] == '-');
+		token.erase(0, 1);
+	}
+	if (token.rfind("axis", 0) != 0)
+		return false;
+	const char *index_str = token.c_str() + 4;
+	if (*index_str == '\0')
+		return false;
+	char *endptr = NULL;
+	long axis_index = strtol(index_str, &endptr, 10);
+	if (endptr == index_str || *endptr != '\0' || axis_index < 0)
+		return false;
+	result.valid = true;
+	result.source = static_cast<int>(axis_index);
+	result.invert = invert;
+	binding = result;
+	return true;
+}
+
+static uint8 hat_direction_mask(std::string dir)
+{
+	dir = to_lower(trim(dir));
+	dir.erase(std::remove_if(dir.begin(), dir.end(), [](char c) {
+		return c == '_' || c == '-' || c == ' ';
+	}), dir.end());
+	if (dir == "up") return SDL_HAT_UP;
+	if (dir == "down") return SDL_HAT_DOWN;
+	if (dir == "left") return SDL_HAT_LEFT;
+	if (dir == "right") return SDL_HAT_RIGHT;
+	if (dir == "upleft") return SDL_HAT_UP | SDL_HAT_LEFT;
+	if (dir == "upright") return SDL_HAT_UP | SDL_HAT_RIGHT;
+	if (dir == "downleft") return SDL_HAT_DOWN | SDL_HAT_LEFT;
+	if (dir == "downright") return SDL_HAT_DOWN | SDL_HAT_RIGHT;
+	return 0;
+}
+
+static bool parse_button_binding(const std::string &value, JoystickButtonBinding &binding)
+{
+	JoystickButtonBinding result;
+	result.type = JoystickButtonBinding::NONE;
+	result.index = -1;
+	result.hat_mask = 0;
+
+	std::string token = to_lower(trim(value));
+	if (token.empty() || token == "disabled" || token == "none") {
+		binding = result;
+		return true;
+	}
+	if (token.rfind("button", 0) == 0) {
+		const char *index_str = token.c_str() + 6;
+		if (*index_str == '\0')
+			return false;
+		char *endptr = NULL;
+		long button_index = strtol(index_str, &endptr, 10);
+		if (endptr == index_str || *endptr != '\0' || button_index < 0)
+			return false;
+		result.type = JoystickButtonBinding::BUTTON;
+		result.index = static_cast<int>(button_index);
+		binding = result;
+		return true;
+	}
+	if (token.rfind("hat", 0) == 0) {
+		size_t pos = 3;
+		while (pos < token.size() && isdigit(static_cast<unsigned char>(token[pos])))
+			++pos;
+		if (pos == 3)
+			return false;
+		std::string hat_index_str = token.substr(3, pos - 3);
+		std::string direction = token.substr(pos);
+		if (!direction.empty() && direction[0] == '_')
+			direction.erase(0, 1);
+		char *endptr = NULL;
+		long hat_index = strtol(hat_index_str.c_str(), &endptr, 10);
+		if (endptr == hat_index_str.c_str() || *endptr != '\0' || hat_index < 0)
+			return false;
+		uint8 mask = hat_direction_mask(direction);
+		if (mask == 0)
+			return false;
+		result.type = JoystickButtonBinding::HAT;
+		result.index = static_cast<int>(hat_index);
+		result.hat_mask = mask;
+		binding = result;
+		return true;
+	}
+	return false;
+}
+
+static void joystick_parse_map(const char *spec)
+{
+	joystick_reset_bindings();
+	if (spec == NULL)
+		return;
+	std::string mapping(spec);
+	size_t pos = 0;
+	while (pos < mapping.size()) {
+		size_t next = mapping.find(',', pos);
+		std::string entry = mapping.substr(pos, next == std::string::npos ? std::string::npos : next - pos);
+		pos = (next == std::string::npos) ? mapping.size() : next + 1;
+		entry = trim(entry);
+		if (entry.empty())
+			continue;
+		size_t eq = entry.find('=');
+		if (eq == std::string::npos)
+			continue;
+		std::string key = to_lower(trim(entry.substr(0, eq)));
+		std::string value = entry.substr(eq + 1);
+		if (key == "x" || key == "axis0") {
+			JoystickAxisBinding binding;
+			if (parse_axis_binding(value, binding))
+				joystick_axis_bindings[0] = binding;
+		} else if (key == "y" || key == "axis1") {
+			JoystickAxisBinding binding;
+			if (parse_axis_binding(value, binding))
+				joystick_axis_bindings[1] = binding;
+		} else if (key.rfind("btn", 0) == 0) {
+			char *endptr = NULL;
+			long mac_button = strtol(key.c_str() + 3, &endptr, 10);
+			if (endptr != key.c_str() + 3 && *endptr == '\0' && mac_button >= 0 && mac_button < ADB_JOYSTICK_BUTTON_COUNT) {
+				JoystickButtonBinding binding;
+				if (parse_button_binding(value, binding))
+					joystick_button_bindings[static_cast<int>(mac_button)] = binding;
+			}
+		}
+	}
+}
+
+static void joystick_apply_button_state(int mac_button, bool pressed)
+{
+	if (mac_button < 0 || mac_button >= ADB_JOYSTICK_BUTTON_COUNT)
+		return;
+	if (joystick_button_host_state[mac_button] == pressed)
+		return;
+	joystick_button_host_state[mac_button] = pressed;
+	if (pressed)
+		ADBJoystickDown(mac_button);
+	else
+		ADBJoystickUp(mac_button);
+}
+
+static int map_axis_value(Sint16 value, bool invert)
+{
+	int v = invert ? -value : value;
+	if (joystick_deadzone > 0) {
+		if (v >= -joystick_deadzone && v <= joystick_deadzone)
+			v = 0;
+	}
+	double normalized = (v >= 0) ? static_cast<double>(v) / 32767.0 : static_cast<double>(v) / 32768.0;
+	int result = static_cast<int>((normalized + 1.0) * 127.5 + 0.5);
+	if (result < 0)
+		result = 0;
+	if (result > 255)
+		result = 255;
+	return result;
+}
+
+static void joystick_close_device(void)
+{
+	if (active_joystick) {
+		SDL_JoystickClose(active_joystick);
+		active_joystick = NULL;
+	}
+	active_joystick_instance = -1;
+	active_joystick_index = -1;
+	joystick_hat_states.clear();
+	for (int i = 0; i < ADB_JOYSTICK_BUTTON_COUNT; ++i)
+		joystick_apply_button_state(i, false);
+	for (int i = 0; i < ADB_JOYSTICK_AXIS_COUNT; ++i) {
+		joystick_axis_values[i] = 0x80;
+		ADBJoystickSetAxis(i, joystick_axis_values[i]);
+	}
+	ADBJoystickSetConnected(false);
+}
+
+static bool joystick_open_device(int index)
+{
+	if (index < 0)
+		return false;
+	if (SDL_NumJoysticks() <= index)
+		return false;
+	SDL_Joystick *joy = SDL_JoystickOpen(index);
+	if (joy == NULL)
+		return false;
+	joystick_close_device();
+	active_joystick = joy;
+	active_joystick_index = index;
+	active_joystick_instance = SDL_JoystickInstanceID(joy);
+	joystick_hat_states.assign(SDL_JoystickNumHats(joy), SDL_HAT_CENTERED);
+	SDL_JoystickEventState(SDL_ENABLE);
+	ADBJoystickSetConnected(true);
+	for (int i = 0; i < ADB_JOYSTICK_AXIS_COUNT; ++i)
+		ADBJoystickSetAxis(i, joystick_axis_values[i]);
+	return true;
+}
+
+static void joystick_init(void)
+{
+	joystick_pref_enabled = PrefsFindBool("adb_joystick");
+	configured_joystick_index = PrefsFindInt32("adb_joystick_index");
+	if (configured_joystick_index < 0)
+		configured_joystick_index = 0;
+	joystick_deadzone = PrefsFindInt32("adb_joystick_deadzone");
+	if (joystick_deadzone < 0)
+		joystick_deadzone = 0;
+	if (joystick_deadzone > 32767)
+		joystick_deadzone = 32767;
+	joystick_reset_bindings();
+	joystick_parse_map(PrefsFindString("adb_joystick_map"));
+	for (int i = 0; i < ADB_JOYSTICK_AXIS_COUNT; ++i) {
+		joystick_axis_values[i] = 0x80;
+		ADBJoystickSetAxis(i, joystick_axis_values[i]);
+	}
+	joystick_hat_states.clear();
+	joystick_close_device();
+	if (!joystick_pref_enabled)
+		return;
+	if (!joystick_open_device(configured_joystick_index)) {
+		if (configured_joystick_index != 0)
+			joystick_open_device(0);
+	}
+}
+
+static void joystick_shutdown(void)
+{
+	joystick_pref_enabled = false;
+	joystick_close_device();
+}
+
+static void joystick_handle_device_added(int device_index)
+{
+	if (!joystick_pref_enabled)
+		return;
+	if (configured_joystick_index < 0)
+		configured_joystick_index = 0;
+	if (configured_joystick_index == device_index && active_joystick_index != device_index) {
+		joystick_open_device(configured_joystick_index);
+		return;
+	}
+	if (active_joystick)
+		return;
+	if (!joystick_open_device(configured_joystick_index))
+		joystick_open_device(device_index);
+}
+
+static void joystick_handle_device_removed(SDL_JoystickID instance_id)
+{
+	if (instance_id != active_joystick_instance)
+		return;
+	joystick_close_device();
+	if (!joystick_pref_enabled)
+		return;
+	if (!joystick_open_device(configured_joystick_index) && configured_joystick_index != 0)
+		joystick_open_device(0);
+}
+
+static void joystick_handle_axis_motion(const SDL_JoyAxisEvent &event)
+{
+	if (!joystick_pref_enabled)
+		return;
+	if (event.which != active_joystick_instance)
+		return;
+	for (int mac_axis = 0; mac_axis < ADB_JOYSTICK_AXIS_COUNT; ++mac_axis) {
+		const JoystickAxisBinding &binding = joystick_axis_bindings[mac_axis];
+		if (!binding.valid)
+			continue;
+		if (binding.source != event.axis)
+			continue;
+		int value = map_axis_value(event.value, binding.invert);
+		joystick_axis_values[mac_axis] = value;
+		ADBJoystickSetAxis(mac_axis, value);
+	}
+}
+
+static void joystick_handle_button_event(const SDL_JoyButtonEvent &event, bool pressed)
+{
+	if (!joystick_pref_enabled)
+		return;
+	if (event.which != active_joystick_instance)
+		return;
+	for (int mac_button = 0; mac_button < ADB_JOYSTICK_BUTTON_COUNT; ++mac_button) {
+		const JoystickButtonBinding &binding = joystick_button_bindings[mac_button];
+		if (binding.type != JoystickButtonBinding::BUTTON)
+			continue;
+		if (binding.index != event.button)
+			continue;
+		joystick_apply_button_state(mac_button, pressed);
+	}
+}
+
+static void joystick_handle_hat_motion(const SDL_JoyHatEvent &event)
+{
+	if (!joystick_pref_enabled)
+		return;
+	if (event.which != active_joystick_instance)
+		return;
+	if (event.hat < 0 || event.hat >= static_cast<int>(joystick_hat_states.size()))
+		return;
+	joystick_hat_states[event.hat] = event.value;
+	for (int mac_button = 0; mac_button < ADB_JOYSTICK_BUTTON_COUNT; ++mac_button) {
+		const JoystickButtonBinding &binding = joystick_button_bindings[mac_button];
+		if (binding.type != JoystickButtonBinding::HAT)
+			continue;
+		if (binding.index != event.hat)
+			continue;
+		bool pressed = (event.value & binding.hat_mask) == binding.hat_mask;
+		joystick_apply_button_state(mac_button, pressed);
+	}
+}
+
 static int present_sdl_video();
 static int SDLCALL on_sdl_event_generated(void *userdata, SDL_Event * event);
 static bool is_fullscreen(SDL_Window *);
@@ -1427,11 +1809,13 @@ bool VideoInit(bool classic)
 	keycode_init();
 
 	// Read prefs
-	frame_skip = PrefsFindInt32("frameskip");
-	mouse_wheel_mode = PrefsFindInt32("mousewheelmode");
-	mouse_wheel_lines = PrefsFindInt32("mousewheellines");
-	mouse_wheel_reverse = mouse_wheel_lines < 0;
-	if (mouse_wheel_reverse) mouse_wheel_lines = -mouse_wheel_lines;
+        frame_skip = PrefsFindInt32("frameskip");
+        mouse_wheel_mode = PrefsFindInt32("mousewheelmode");
+        mouse_wheel_lines = PrefsFindInt32("mousewheellines");
+        mouse_wheel_reverse = mouse_wheel_lines < 0;
+        if (mouse_wheel_reverse) mouse_wheel_lines = -mouse_wheel_lines;
+
+        joystick_init();
 
 	// Get screen mode from preferences
 	migrate_screen_prefs();
@@ -1648,10 +2032,12 @@ void SDL_monitor_desc::video_close(void)
 
 void VideoExit(void)
 {
-	// Close displays
-	vector<monitor_desc *>::iterator i, end = VideoMonitors.end();
-	for (i = VideoMonitors.begin(); i != end; ++i)
-		dynamic_cast<SDL_monitor_desc *>(*i)->video_close();
+        joystick_shutdown();
+
+        // Close displays
+        vector<monitor_desc *>::iterator i, end = VideoMonitors.end();
+        for (i = VideoMonitors.begin(); i != end; ++i)
+                dynamic_cast<SDL_monitor_desc *>(*i)->video_close();
 
 	// Destroy locks
 	if (frame_buffer_lock)
@@ -2381,12 +2767,12 @@ static void handle_events(void)
 			case SDL_MOUSEWHEEL:
 				if (!event.wheel.y) break;
 				if (!mouse_wheel_mode) {
-					int key = (event.wheel.y < 0) ^ mouse_wheel_reverse ? 0x79 : 0x74;	// Page up/down
+					int key = (event.wheel.y < 0) ^ mouse_wheel_reverse ? 0x79 : 0x74;      // Page up/down
 					ADBKeyDown(key);
 					ADBKeyUp(key);
 				}
 				else {
-					int key = (event.wheel.y < 0) ^ mouse_wheel_reverse ? 0x3d : 0x3e;	// Cursor up/down
+					int key = (event.wheel.y < 0) ^ mouse_wheel_reverse ? 0x3d : 0x3e;      // Cursor up/down
 					for (int i = 0; i < mouse_wheel_lines; i++) {
 						ADBKeyDown(key);
 						ADBKeyUp(key);
@@ -2394,68 +2780,30 @@ static void handle_events(void)
 				}
 				break;
 
-				// Joystick moved
-/*			case SDL_JOYAXISMOTION:
-    		if ( ( event.jaxis.value < -3200 ) || (event.jaxis.value > 3200 ) )
-    		{
-    	    	if( event.jaxis.axis == 0)
-    	    	{
-					//
-					//
-					drv->joystick_moved(event.motion.x);
-					printf("Joystick X moved\n");
-		        }
-
-       			if( event.jaxis.axis == 1)
-       			{
-					//
-					//
-					drv->joystick_moved(event.motion.y);
-					printf("Joystick Y moved\n");
-    	   		}
-    		}
-			break;
-
-			// Joystick button
-			case SDL_JOYBUTTONDOWN: {
-				unsigned int button = event.jbutton.button;
-				if (button == 0){
-					ADBJoystickDown(0);
-					printf("Joy Button 0 pressed\n");
-				}
-				else if (button == 1){
-					ADBJoystickDown(1);
-					printf("Joy Button 1 pressed\n");
-				}
-				else if (button == 2){
-					ADBJoystickDown(2);
-					printf("Joy Button 2 pressed\n");
-				}
-				else if (button == 3){
-					ADBJoystickDown(3);
-					printf("Joy Button 3 pressed\n");
-				}
-				else if (button == 4){
-					ADBJoystickDown(4);
-					printf("Joy Button 4 pressed\n");
-				}
+			case SDL_JOYDEVICEADDED:
+				joystick_handle_device_added(event.jdevice.which);
 				break;
-			}
-			case SDL_JOYBUTTONUP: {
-				unsigned int button = event.jbutton.button;
-				if (button == 0)
-					ADBJoystickUp(0);
-				else if (button == 1)
-					ADBJoystickUp(1);
-				else if (button == 2)
-					ADBJoystickUp(2);
-				else if (button == 3)
-					ADBJoystickUp(3);
-				else if (button == 4)
-					ADBJoystickUp(4);
+
+			case SDL_JOYDEVICEREMOVED:
+				joystick_handle_device_removed(event.jdevice.which);
 				break;
-			}*/
-				// Keyboard
+
+			case SDL_JOYAXISMOTION:
+				joystick_handle_axis_motion(event.jaxis);
+				break;
+
+			case SDL_JOYBUTTONDOWN:
+				joystick_handle_button_event(event.jbutton, true);
+				break;
+
+			case SDL_JOYBUTTONUP:
+				joystick_handle_button_event(event.jbutton, false);
+				break;
+
+			case SDL_JOYHATMOTION:
+				joystick_handle_hat_motion(event.jhat);
+				break;
+
 			case SDL_KEYDOWN: {
 				if (event.key.repeat)
 					break;

@@ -72,6 +72,10 @@ prefs_desc common_prefs_items[] = {
 	{"keycodefile", TYPE_STRING, false, "path of keycode translation file"},
 	{"mousewheelmode", TYPE_INT32, false, "mouse wheel support (0=page up/down, 1=cursor up/down)"},
 	{"mousewheellines", TYPE_INT32, false, "number of lines to scroll in mouse wheel mode 1"},
+	{"adb_joystick", TYPE_BOOLEAN, false, "enable SDL joystick to ADB mapping"},
+	{"adb_joystick_index", TYPE_INT32, false, "preferred SDL joystick device index"},
+	{"adb_joystick_map", TYPE_STRING, false, "ADB joystick mapping overrides"},
+	{"adb_joystick_deadzone", TYPE_INT32, false, "joystick axis deadzone (0-32767)"},
 	{"hotkey",TYPE_INT32,false,"hotkey modifier"},
 	{"scale_nearest",TYPE_BOOLEAN,false,"nearest neighbor scaling"},
 	{"scale_integer",TYPE_BOOLEAN,false,"integer scaling"},
@@ -134,4 +138,8 @@ void AddPrefsDefaults(void)
 	PrefsAddBool("swap_opt_cmd", true);
 #endif
 	PrefsAddBool("ignoresegv", true);
+	PrefsAddBool("adb_joystick", false);
+	PrefsAddInt32("adb_joystick_index", 0);
+	PrefsAddInt32("adb_joystick_deadzone", 4096);
+	PrefsAddString("adb_joystick_map", "");
 }
